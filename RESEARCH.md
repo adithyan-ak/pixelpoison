@@ -309,6 +309,108 @@ This is more principled than M-Attack's random cropping for local alignment, but
 
 ---
 
+### 2.10 PSI — Progressive Semantic Infusion (Diffusion-Based Attack)
+
+**Paper:** "Transferable and Stealthy Adversarial Attacks on Large Vision-Language Models"
+**Authors:** Zhewen Yao, Yao Zhu, Shiliang Zhang
+**Published:** ICLR 2026 (poster, January 2026)
+**URL:** https://openreview.net/forum?id=liQueBuFXi
+**Models tested:** GPT-5, Grok-4, and multiple open-source VLMs
+
+**Technique:**
+PSI represents a fundamentally different attack paradigm from gradient-based perturbation. Instead of adding noise to an existing image, PSI uses **diffusion model priors** to progressively infuse target semantics into the image during the reverse diffusion (denoising) process.
+
+Key innovations:
+1. **Diffusion-prior alignment**: The adversarial image is generated within the natural image manifold (the diffusion model's learned distribution), making it inherently more natural-looking than additive perturbation.
+2. **Progressive alignment**: Rather than optimizing against a single fixed surrogate objective (which causes overfitting), PSI gradually shifts the semantic content across denoising steps, mitigating surrogate-specific overfitting.
+3. **Source-aware cues**: During denoising, PSI embeds cues from the original image to preserve visual fidelity while injecting target semantics.
+
+**Strengths:** Produces highly stealthy adversarial images that are within the natural image distribution. Proven transfer to GPT-5 and Grok-4 (commercial frontier models). The diffusion-based approach is robust to purification defenses (DiffCAP, DiffPure) because the adversarial image already lives on the diffusion manifold.
+**Weaknesses:** Requires a diffusion model (Stable Diffusion ~2-4GB), significantly more compute per image than PGD-family methods. The generation process is less controllable — harder to tune epsilon-style perturbation budgets. Requires the diffusion model to support the source image's domain.
+
+**Role in PixelPoison:** Deferred from MVP. PSI's diffusion-based paradigm is architecturally incompatible with the PGD-family optimization loop shared by all current strategies. Integration would require a parallel generation pipeline. Noted here as the strongest known post-MVP enhancement — especially valuable when PGD-family attacks fail against well-defended models. A future Tier 3+ or separate `--strategy diffusion` mode could incorporate this.
+
+---
+
+### 2.11 AnyAttack — Self-Supervised Adversarial Noise Generator
+
+**Paper:** "AnyAttack: Towards Large-scale Self-supervised Adversarial Attacks on Vision-Language Models"
+**Authors:** Jiaming Zhang, Junhong Ye, Xingjun Ma, et al.
+**Published:** CVPR 2025
+**URL:** https://cvpr.thecvf.com/virtual/2025/poster/35117
+**Models tested:** CLIP, BLIP, BLIP2, InstructBLIP, MiniGPT-4; transfers to Google Gemini, Claude Sonnet, Microsoft Copilot, OpenAI GPT
+
+**Technique:**
+AnyAttack pre-trains an **adversarial noise generator** network on LAION-400M. Unlike per-image optimization (PGD, CoTTA, M-Attack), the generator learns to produce adversarial perturbations in a single forward pass — no iterative optimization at inference time.
+
+Key innovations:
+1. **Self-supervised, label-free**: Uses contrastive learning to train the generator without requiring labeled attack targets. Any image can serve as a target.
+2. **Pre-training + fine-tuning paradigm**: The generator is pre-trained on a large corpus for general adversarial capability, then fine-tuned for specific target images/text.
+3. **Amortized attack cost**: After pre-training (~hours), generating an adversarial image takes milliseconds (single forward pass through the generator).
+
+**Strengths:** Extremely fast at inference time. Strong cross-model transferability demonstrated on Claude, Gemini, GPT. The large-scale pre-training captures general adversarial features that transfer broadly.
+**Weaknesses:** The pre-training step is expensive (~hours on A100). The generator is trained against specific surrogate models — transferability depends on surrogate diversity during pre-training. Less flexible than per-image optimization for specific payloads.
+
+**Role in PixelPoison:** Deferred from MVP. The pre-trained generator approach could be offered as a "fast mode" alternative to iterative optimization. Integration would require distributing a pre-trained generator checkpoint (~500MB-1GB). Noted as high-priority post-MVP enhancement for a `pixelpoison encode --fast` mode that generates adversarial images in seconds rather than minutes.
+
+---
+
+### 2.12 SigLIP 2 — The Evolving Encoder Landscape
+
+**Paper:** "SigLIP 2: Multilingual Vision-Language Encoders with Improved Semantic Understanding, Localization, and Dense Features"
+**Authors:** Google DeepMind
+**Published:** February 2025
+
+**Why this matters for PixelPoison:**
+SigLIP 2 is replacing CLIP as the vision encoder in an increasing number of VLMs (PaliGemma 2, and likely newer closed-source models). It differs from CLIP in ways that directly affect transfer attack design:
+
+| Feature | CLIP | SigLIP 2 |
+|---------|------|----------|
+| Loss function | Contrastive (softmax, NxN matrix) | Sigmoid (binary per-pair, no batch dependence) |
+| Localization | Weak (CLS-token-centric) | Strong (decoder head with bounding box prediction) |
+| Training objectives | Image-text contrastive only | Contrastive + caption prediction + bbox prediction + region captioning + self-distillation |
+| Resolution | Fixed (224/336px) | Fixed (224-512px) + NaFlex dynamic resolution/aspect ratio |
+| Model sizes | ViT-B/16, B/32, L/14 | Base (86M), Large (303M), SO400M (400M), Giant (1B) |
+| Tokenizer | BPE (77 tokens max) | GemmaTokenizer (64 tokens max) |
+
+**Implications for attacks:**
+1. Attacks optimized solely against CLIP may show reduced transfer to SigLIP 2-based VLMs due to the different loss function creating different learned feature geometries.
+2. SigLIP 2's localization-aware training makes it potentially more robust to attacks that lack spatial semantic structure (basic PGD noise). This validates M-Attack's random-crop approach and SGMA's semantic guidance.
+3. The NaFlex dynamic resolution variants complicate attacks that assume fixed input resolution.
+
+**Role in PixelPoison:** Add SigLIP ViT-SO400M/14 to the surrogate ensemble at Tier 2+ (via `open_clip` which supports SigLIP loading). Optimizing against both CLIP and SigLIP simultaneously significantly improves transfer coverage to modern VLMs. This is an MVP requirement, not a deferral.
+
+---
+
+### 2.13 Typography Augmentation for Transferability (TATM)
+
+**Paper:** "Transfer Attack for Bad and Good: Explain and Boost Adversarial Transferability across Multimodal Large Language Models"
+**Authors:** Hao Cheng, Erjia Xiao, Jiayan Yang, et al.
+**Published:** ACM MM 2025 (October 2025)
+
+**Technique:**
+TATM uses typography-based data augmentation during adversarial optimization. During the loss computation, the adversarial image is augmented with random text overlays (varying font, size, position, opacity) before being fed to the surrogate CLIP model. This forces the perturbation to be robust to the presence of text in the image — a condition commonly encountered in real-world VLM inputs.
+
+The paper also identifies that transferability in MLLMs is strongest in **cross-LLM scenarios with the same vision encoder** (e.g., LLaVA → InstructBLIP, both using CLIP ViT-L/14). Transfer across different vision encoders is significantly harder.
+
+**Role in PixelPoison:** The typography augmentation can be incorporated as an additional augmentation step in M-Attack's optimization loop alongside random cropping. Lightweight and orthogonal to existing techniques. The cross-encoder transferability finding reinforces the importance of including both CLIP and SigLIP surrogates.
+
+---
+
+### 2.14 Schaeffer et al. — Transfer Failures as Baseline Context
+
+**Paper:** "Failures to Find Transferable Image Jailbreaks Between VLMs"
+**Authors:** Schaeffer et al.
+**Published:** ICLR 2025 (25 citations)
+
+**Key finding:** Naive adversarial image jailbreaks generally FAIL to transfer between VLMs. This paper tested basic PGD-style attacks and found low cross-model transfer rates.
+
+**Why this matters:** This result applies to unsophisticated single-surrogate PGD attacks. Papers published after Schaeffer (M-Attack, CoTTA, PSI, X-Transfer, SGMA) have demonstrated that transferability IS achievable with multi-surrogate ensembles, semantic guidance, and dual-modality approaches. Schaeffer's finding validates PixelPoison's multi-strategy, multi-surrogate design — a single PGD pass against one CLIP model is insufficient.
+
+**Role in PixelPoison:** This paper is the baseline that PixelPoison's entire pipeline is designed to surpass. The Tier 1 (single CLIP) configuration is expected to have limited transferability, consistent with Schaeffer's findings. Tier 2+ with ensemble surrogates and advanced strategies is where meaningful transfer rates are expected.
+
+---
+
 ## 3. Key Open Questions in the Literature
 
 These are unsolved problems that PixelPoison's evaluation may shed light on:
@@ -319,13 +421,15 @@ Across every published paper:
 - M-Attack: 95% on GPT-4o, 26% on Claude-3.5
 - Invisible Injections: ~24% average, Claude at the low end
 - CoTTA: claims improvement but exact Claude numbers unclear
+- AnyAttack (CVPR 2025): confirms transfer to Claude Sonnet but at lower rates than GPT
 
-No paper has published a definitive explanation. Hypotheses:
-- Anthropic may apply non-standard vision preprocessing (different normalization, resolution, or augmentation)
-- Claude may use a vision encoder not derived from OpenAI's CLIP family (SigLIP or proprietary)
-- Claude's safety training may include adversarial image robustness
+No paper has published a definitive explanation. Hypotheses (updated with 2025-2026 findings):
+- **SigLIP hypothesis (strengthened):** Claude may use SigLIP or SigLIP 2 rather than CLIP. SigLIP's sigmoid loss creates different feature geometries than CLIP's contrastive loss. Adding SigLIP surrogates to the ensemble is the most actionable mitigation.
+- **Preprocessing pipeline:** Claude downscales images to 1568px max dimension using bicubic interpolation, then tokenizes at `(width × height) / 750` tokens. This is different from GPT-4o's 512×512 tiling approach. Perturbations must survive this specific preprocessing.
+- **Safety training:** Anthropic may include adversarial image robustness in safety training. The AdPO defense (ICLR 2026) demonstrates that adversarial preference optimization on the vision encoder can dramatically reduce attack success — Anthropic may deploy something similar.
+- **End-to-end architecture:** If Claude uses a tightly integrated vision-language architecture (similar to GPT-4o's unified approach), the separable CLIP encoder bottleneck that transfer attacks exploit may not exist.
 
-**PixelPoison contribution:** If the multi-level pipeline (encoder + projector + text trigger) achieves meaningfully higher success on Claude, this reveals which attack surface is most effective against Claude's specific architecture — a publishable finding.
+**PixelPoison contribution:** Testing with SigLIP surrogates alongside CLIP will reveal whether the CLIP/SigLIP encoder mismatch explains Claude's robustness. If the multi-level pipeline (encoder + projector + text trigger) with SigLIP surrogates achieves meaningfully higher success on Claude, this is a publishable finding.
 
 ### 3.2 Does Instruction Complexity Affect Success Rate?
 
@@ -339,14 +443,69 @@ Are some images more "perturbable" than others? An image with lots of high-frequ
 
 **PixelPoison contribution:** The evaluation should test across image categories (documents, photos, charts, UI screenshots) and report any significant variance.
 
+### 3.4 Does the Surrogate Encoder Family Determine Transfer Success?
+
+TATM (ACM MM 2025) found that transferability is strongest when surrogate and target share the same vision encoder family (both CLIP-based, or both SigLIP-based). Cross-encoder-family transfer is significantly harder. Yet all existing attack tools use only CLIP surrogates. As VLMs adopt SigLIP 2 and proprietary encoders, the CLIP-only surrogate strategy may become increasingly ineffective.
+
+**PixelPoison contribution:** By including both CLIP and SigLIP surrogates and reporting per-surrogate-family scores, PixelPoison can systematically quantify the encoder-family transfer gap.
+
+### 3.5 How Robust Are Attacks to Emerging Defenses?
+
+The defense landscape is evolving rapidly (see §4). Key threats to PixelPoison's attack pipeline:
+- **Diffusion purification** (DiffCAP, DiffPure-VLM): Forward diffusion + denoising can neutralize perturbations that lie outside the natural image manifold. PGD-family perturbations are vulnerable; PSI's diffusion-based approach is inherently resistant.
+- **Adversarial preference optimization** (AdPO, ICLR 2026): Retrains the vision encoder to prefer clean features. Directly counters CLIP-targeted attacks. Mitigated by multi-encoder ensemble and projector-level attacks (IPGA).
+- **Plug-and-play prompt defenses** (PromptGuard): Tunes learnable prompts in the Q-Former to filter adversarial signals. Low deployment cost (~8% inference overhead) makes widespread adoption likely.
+
+**PixelPoison contribution:** Evaluation should test generated images against DiffPure-VLM purification and measure degradation. Results would reveal which strategies survive defenses.
+
 ---
 
-## 4. Research Update Log
+## 4. Defense Landscape (Attacker's Perspective)
+
+Understanding active and emerging defenses is critical for designing attacks with the highest probability of success. This section summarizes defenses an attacker must anticipate.
+
+### 4.1 Training-Free Defenses (Most Likely Deployed in Production)
+
+These require no model retraining, making them cheap to deploy:
+
+| Defense | Approach | Threat to PixelPoison |
+|---------|----------|----------------------|
+| **COLA** (SOTA) | Optimal transport to re-establish image-text correspondence | High — directly counters embedding misalignment attacks |
+| **TTC** | CLIP-based counterattack perturbation during inference | Medium — adds noise that may disrupt our perturbation |
+| **DiffPure-VLM** (ICCV 2025) | Diffusion-based purification via forward+reverse denoising | High — can neutralize PGD-family perturbations |
+| **VALD** (Feb 2026) | Multi-stage detection before VLM processes image | Medium — binary detection, not purification |
+| Input preprocessing | JPEG compression, Gaussian blur, resizing | Medium — addressed by DiffJPEG and DCT targeting |
+
+**Mitigation strategy:** PixelPoison's DiffJPEG + DCT mid-frequency targeting addresses preprocessing-based defenses. For purification defenses (DiffPure, COLA), the combination of CoTTA's semantic text trigger (which provides a non-perturbative signal) and IPGA's projector-level attack (which operates deeper than encoder-level purification) offers the best resilience. The evaluation phase should test against DiffPure specifically.
+
+### 4.2 Training-Time Defenses (Less Likely Deployed Due to Cost)
+
+| Defense | Approach | Threat to PixelPoison |
+|---------|----------|----------------------|
+| **AdPO** (ICLR 2026) | Adversarial preference optimization on vision encoder | High — directly hardens the CLIP encoder |
+| **MAT** (WACV 2026) | Multimodal adversarial training (image + text) | Medium — first dual-modality defense |
+| **PromptGuard** (Apr 2026) | Learnable prompts in Q-Former to filter adversarial signals | Medium — cheap enough for deployment |
+
+### 4.3 Implications for Pipeline Design
+
+1. **Multi-level attacks are critical:** Encoder-only attacks (PGD, M-Attack) are vulnerable to encoder-level defenses (AdPO, COLA). Projector-level (IPGA) and semantic (CoTTA text trigger) attacks operate at different layers, providing defense bypass.
+2. **JPEG hardening is necessary but insufficient:** Preprocessing defenses are the baseline. PixelPoison already handles these. The real threat is purification and adversarial training.
+3. **CoTTA's text trigger is defense-resistant:** The embedded text is a non-perturbative semantic signal — it survives purification because it's not "noise" to be removed, it's actual image content (text rendered at low opacity).
+
+---
+
+## 5. Research Update Log
 
 > Record any new papers or findings that affect PixelPoison's design here.
 
 | Date | Update | Impact on PixelPoison |
 |------|--------|----------------------|
 | 2026-04-03 | Initial research compilation | Baseline |
-| | | |
-| | | |
+| 2026-04-03 | Added PSI (ICLR 2026) — diffusion-based attack proven on GPT-5/Grok-4 | Deferred from MVP; strongest known post-MVP enhancement |
+| 2026-04-03 | Added AnyAttack (CVPR 2025) — pre-trained noise generator | Deferred from MVP; future fast-mode candidate |
+| 2026-04-03 | Added SigLIP 2 encoder analysis | **MVP change:** Add SigLIP ViT-SO400M/14 to Tier 2+ ensemble |
+| 2026-04-03 | Added TATM typography augmentation (ACM MM 2025) | Incorporate into M-Attack augmentation pipeline |
+| 2026-04-03 | Added Schaeffer et al. (ICLR 2025) transfer failure baseline | Validates multi-surrogate, multi-strategy design |
+| 2026-04-03 | Added defense landscape (AdPO, DiffPure, COLA, VALD, PromptGuard) | Informs strategy design priorities; evaluation should test against DiffPure |
+| 2026-04-03 | Updated Claude analysis with SigLIP hypothesis and preprocessing details | SigLIP surrogate inclusion addresses Claude transfer gap |
+| 2026-04-03 | Added target VLM preprocessing profiles (companion: TARGET_PROFILES.md) | New `--target` flag enables target-aware optimization |

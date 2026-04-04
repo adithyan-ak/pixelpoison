@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pixelpoison"
+version = "0.1.0"
+description = "Adversarial image generation tool for VLM security testing"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
+keywords = ["adversarial", "vlm", "clip", "security", "red-team"]
+
+dependencies = [
+    "torch>=2.2",
+    "open-clip-torch>=3.0",
+    "torchvision>=0.17",
+    "Pillow>=10.0",
+    "typer>=0.12",
+    "rich>=13.0",
+    "numpy>=1.26",
+    "scikit-image>=0.22",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+tier3 = [
+    "transformers>=4.40",
+    "bitsandbytes>=0.43",
+    "accelerate>=0.30",
+    "sentence-transformers>=3.0",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+pixelpoison = "pixelpoison.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["pixelpoison*"]
+
+[tool.ruff]
+line-length = 100
+select = ["E", "F", "W", "I"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
