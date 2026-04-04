@@ -57,9 +57,11 @@ def _differentiable_crop_resize(
     crop_box: tuple[float, float, float, float],
     target_size: int = 224,
 ) -> torch.Tensor:
-    """Differentiable random crop and resize using grid_sample.
+    """Differentiable random crop and resize via slicing + interpolate.
 
-    Gradients flow back from the cropped output to the full input image.
+    Uses tensor slicing (gradient flows to cropped pixels) and F.interpolate
+    (differentiable on all backends) instead of grid_sample, whose backward
+    is not implemented on MPS.
 
     Args:
         x: Image tensor (B, C, H, W).
@@ -69,9 +71,16 @@ def _differentiable_crop_resize(
     Returns:
         Cropped and resized tensor (B, C, target_size, target_size).
     """
-    theta = _compute_affine_from_crop(crop_box, x.shape[2], x.shape[3]).to(x.device)
-    grid = F.affine_grid(theta, [x.shape[0], x.shape[1], target_size, target_size], align_corners=True)
-    return F.grid_sample(x, grid, mode="bilinear", align_corners=True)
+    _, _, h, w = x.shape
+    y1, x1, y2, x2 = crop_box
+
+    py1 = max(0, min(int(y1 * h), h - 1))
+    py2 = max(py1 + 1, min(int(y2 * h), h))
+    px1 = max(0, min(int(x1 * w), w - 1))
+    px2 = max(px1 + 1, min(int(x2 * w), w))
+
+    cropped = x[:, :, py1:py2, px1:px2]
+    return F.interpolate(cropped, size=(target_size, target_size), mode="bilinear", align_corners=False)
 
 
 def _sample_random_crop(

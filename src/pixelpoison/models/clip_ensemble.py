@@ -56,12 +56,10 @@ class CLIPEnsemble:
             model.eval()
             self._models[model_id] = model
             self._tokenizers[model_id] = open_clip.get_tokenizer(spec.open_clip_model)
-            # Store model dtype for input casting
-            try:
-                p = next(model.parameters())
-                self._dtypes[model_id] = p.dtype
-            except StopIteration:
-                self._dtypes[model_id] = torch.float32
+            # Detect dtype from visual encoder (the part encode_image uses).
+            # Must NOT use next(model.parameters()) — logit_scale or text
+            # encoder params may appear first and stay float32 even with fp16.
+            self._dtypes[model_id] = torch.float16 if precision == "fp16" else torch.float32
 
         self._loaded = True
 
