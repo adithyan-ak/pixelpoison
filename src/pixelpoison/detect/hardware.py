@@ -64,7 +64,7 @@ def detect_hardware() -> HardwareInfo:
     # 1. Check CUDA
     if torch.cuda.is_available():
         props = torch.cuda.get_device_properties(0)
-        memory_gb = props.total_mem / (1024**3)
+        memory_gb = getattr(props, 'total_memory', getattr(props, 'total_mem', 0)) / (1024**3)
         device_name = props.name
         tier = _select_tier("cuda", memory_gb)
         return HardwareInfo(
