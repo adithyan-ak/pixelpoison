@@ -107,21 +107,16 @@ class CLIPEnsemble:
         return self._encode_single(x, model_id)
 
     def _encode_single(self, x: torch.Tensor, model_id: str) -> torch.Tensor:
-        """Internal: normalize, resize, encode with automatic mixed precision."""
+        """Internal: normalize, resize, encode with explicit dtype casting."""
         model = self._models[model_id]
         x_norm = self._normalize(x, model_id)
         x_resized = self._resize_for_model(x_norm, model_id)
         model_dtype = self._dtypes[model_id]
 
-        if model_dtype == torch.float16 and x_resized.is_cuda:
-            # Use autocast for correct mixed-precision gradient flow on CUDA
-            with torch.amp.autocast("cuda", dtype=torch.float16):
-                emb = model.encode_image(x_resized)
-        elif model_dtype == torch.float16:
-            # Non-CUDA fp16 (shouldn't happen — we load fp32 on MPS/CPU)
-            emb = model.encode_image(x_resized.to(dtype=model_dtype))
-        else:
-            emb = model.encode_image(x_resized)
+        if x_resized.dtype != model_dtype:
+            x_resized = x_resized.to(dtype=model_dtype)
+
+        emb = model.encode_image(x_resized)
 
         return F.normalize(emb.float(), dim=-1)
 
