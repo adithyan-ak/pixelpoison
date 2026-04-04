@@ -97,23 +97,32 @@ class CLIPEnsemble:
         assert self._loaded, "Call load() before encode_image()"
         embeddings = {}
         for model_id, model in self._models.items():
-            x_norm = self._normalize(x, model_id)
-            x_resized = self._resize_for_model(x_norm, model_id)
-            # Cast to model dtype (models may be fp16, input is fp32)
-            x_cast = x_resized.to(dtype=self._dtypes[model_id])
-            emb = model.encode_image(x_cast)
-            emb = F.normalize(emb.float(), dim=-1)  # Scores always in fp32
+            emb = self._encode_single(x, model_id)
             embeddings[model_id] = emb
         return embeddings
 
     def encode_image_single(self, x: torch.Tensor, model_id: str) -> torch.Tensor:
         """Encode image through a single model. Returns L2-normalized embedding."""
         assert self._loaded, "Call load() before encode_image_single()"
+        return self._encode_single(x, model_id)
+
+    def _encode_single(self, x: torch.Tensor, model_id: str) -> torch.Tensor:
+        """Internal: normalize, resize, encode with automatic mixed precision."""
         model = self._models[model_id]
         x_norm = self._normalize(x, model_id)
         x_resized = self._resize_for_model(x_norm, model_id)
-        x_cast = x_resized.to(dtype=self._dtypes[model_id])
-        emb = model.encode_image(x_cast)
+        model_dtype = self._dtypes[model_id]
+
+        if model_dtype == torch.float16 and x_resized.is_cuda:
+            # Use autocast for correct mixed-precision gradient flow on CUDA
+            with torch.amp.autocast("cuda", dtype=torch.float16):
+                emb = model.encode_image(x_resized)
+        elif model_dtype == torch.float16:
+            # Non-CUDA fp16 (shouldn't happen — we load fp32 on MPS/CPU)
+            emb = model.encode_image(x_resized.to(dtype=model_dtype))
+        else:
+            emb = model.encode_image(x_resized)
+
         return F.normalize(emb.float(), dim=-1)
 
     def encode_text(self, text: str) -> dict[str, torch.Tensor]:
