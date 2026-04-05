@@ -113,13 +113,18 @@ class StrategyOrchestrator:
                         self.config,
                         progress_callback=_progress_cb,
                     )
-                except RuntimeError as e:
-                    if "out of memory" in str(e).lower():
+                except Exception as e:
+                    error_msg = str(e)
+                    if "out of memory" in error_msg.lower():
                         console.print(f"  [red]OOM during {strategy.name}[/red]")
-                        if torch.cuda.is_available():
-                            torch.cuda.empty_cache()
-                        continue
-                    raise
+                    else:
+                        console.print(
+                            f"  [red]Error during {strategy.name}: "
+                            f"{type(e).__name__}: {error_msg[:200]}[/red]"
+                        )
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    continue
 
             # JPEG hardening (skip in quick mode)
             if self.config.jpeg_robust and not self.config.quick:

@@ -103,6 +103,26 @@ class IPGAStrategy(AttackStrategy):
         projector = ProjectorModel(device)
         projector.load()
 
+        try:
+            return self._run_optimization(
+                projector, clean_image, target_embeddings,
+                ensemble, config, progress_callback, start_time,
+            )
+        finally:
+            projector.unload()
+
+    def _run_optimization(
+        self,
+        projector: ProjectorModel,
+        clean_image: torch.Tensor,
+        target_embeddings: dict[str, torch.Tensor],
+        ensemble,
+        config: AttackConfig,
+        progress_callback,
+        start_time: float,
+    ) -> CandidateResult:
+        device = clean_image.device
+
         # Generate target projector tokens from rendered payload text
         payload_text = getattr(config, '_payload', 'test')
         target_tokens = projector.generate_target_tokens(payload_text)
@@ -114,10 +134,10 @@ class IPGAStrategy(AttackStrategy):
         best_score = -float("inf")
         best_delta = delta.data.clone()
         no_improve_count = 0
+        iteration = 0
 
-        # Loss weights
-        lambda1 = 0.5  # Global projector alignment
-        lambda2 = 0.3  # RQA alignment
+        lambda1 = 0.5
+        lambda2 = 0.3
 
         for iteration in range(config.iterations):
             if delta.grad is not None:
@@ -133,17 +153,17 @@ class IPGAStrategy(AttackStrategy):
                 clip_loss = clip_loss - F.cosine_similarity(emb, target_emb, dim=-1).mean()
             clip_loss = clip_loss / ensemble.model_count
 
-            # Projector-level losses
+            # Projector-level losses (differentiable through Q-Former → vision encoder → pixels)
             query_tokens = projector.get_projected_tokens(x_adv)
 
             # Global alignment
-            query_mean = query_tokens.mean(dim=1)  # (B, D)
-            target_mean = target_tokens.mean(dim=1)  # (B, D)
+            query_mean = query_tokens.mean(dim=1)
+            target_mean = target_tokens.mean(dim=1)
             proj_loss_global = -F.cosine_similarity(query_mean, target_mean, dim=-1).mean()
 
-            # RQA: Residual Query Alignment
-            q = query_tokens.squeeze(0)  # (N, D)
-            t = target_tokens.squeeze(0)  # (M, D)
+            # RQA: Residual Query Alignment (matching detached to avoid quadratic graph)
+            q = query_tokens.squeeze(0)
+            t = target_tokens.squeeze(0)
             assignments = _greedy_query_matching(q.detach(), t.detach())
 
             rqa_loss = torch.tensor(0.0, device=device)
@@ -153,17 +173,14 @@ class IPGAStrategy(AttackStrategy):
                 ).mean()
             rqa_loss = rqa_loss / max(len(assignments), 1)
 
-            # Combined loss
             total_loss = clip_loss + lambda1 * proj_loss_global + lambda2 * rqa_loss
             total_loss.backward()
 
-            # PGD update
             with torch.no_grad():
                 delta.data = delta.data - step_size * delta.grad.sign()
                 delta.data = delta.data.clamp(-config.epsilon, config.epsilon)
                 delta.data = (clean_image + delta.data).clamp(0, 1) - clean_image
 
-            # Track score (CLIP only for monitoring consistency)
             if (iteration + 1) % 25 == 0 or iteration == config.iterations - 1:
                 with torch.no_grad():
                     full_adv = (clean_image + delta.data).clamp(0, 1)
@@ -190,10 +207,6 @@ class IPGAStrategy(AttackStrategy):
                 if no_improve_count >= 10:
                     break
 
-        # Unload projector to free memory for VLM scoring
-        projector.unload()
-
-        # Final result
         adversarial = (clean_image + best_delta).clamp(0, 1)
 
         final_per_model = {}
