@@ -177,7 +177,9 @@ def encode(
     target_embeddings = ensemble.encode_text(payload)
 
     # 5. Configure attack
-    effective_iterations = iterations if iterations is not None else (100 if quick else {1: 300, 2: 500, 3: 500}[effective_tier])
+    # At 336px optimization resolution, each iteration is ~9x faster than 1024px.
+    # Use higher iteration counts for better convergence at negligible time cost.
+    effective_iterations = iterations if iterations is not None else (100 if quick else {1: 500, 2: 1000, 3: 1000}[effective_tier])
 
     attack_config = AttackConfig(
         epsilon=epsilon,

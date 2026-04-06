@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn.functional as F
-import numpy as np
 from PIL import Image
 
 from pixelpoison.image.loader import ImageMeta
@@ -57,7 +57,10 @@ def save_image(
     # Compute perturbation
     perturbation = adversarial - clean
 
-    # If image was downscaled, upsample perturbation to original resolution
+    # If image was downscaled for optimization, upsample perturbation to original resolution.
+    # The perturbation was optimized at CLIP's native resolution (336px max) for efficiency,
+    # then bilinear-upscaled here. This produces a smooth, low-frequency perturbation that
+    # is both less perceptible AND more JPEG-robust than high-res optimization.
     if meta.scale_factor < 1.0:
         orig_h, orig_w = meta.original_size
         perturbation = F.interpolate(
