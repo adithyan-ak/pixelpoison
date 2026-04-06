@@ -6,28 +6,38 @@ from typing import Optional
 
 import torch
 from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeElapsedColumn
+from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 from rich.table import Table
 
 from pixelpoison.attacks.base import AttackConfig, AttackStrategy, CandidateResult
-from pixelpoison.attacks.pgd import PGDBaseline
 from pixelpoison.attacks.cotta import CoTTAStrategy
+from pixelpoison.attacks.cwa import CWAStrategy
 from pixelpoison.attacks.m_attack import MAttackStrategy
-from pixelpoison.robustness import jpeg_harden, check_jpeg_survival
-from pixelpoison.scoring.clip_scorer import compute_clip_score
-from pixelpoison.scoring.ensemble_scorer import compute_ensemble_agreement
-from pixelpoison.scoring.quality import compute_psnr, compute_ssim, check_quality_gate
+from pixelpoison.attacks.pgd import PGDBaseline
+from pixelpoison.attacks.soups import SoupsStrategy
+from pixelpoison.attacks.ssa import SSAStrategy
+from pixelpoison.attacks.vmi_fgsm import VMIFGSMStrategy
+from pixelpoison.robustness import check_jpeg_survival, jpeg_harden
 from pixelpoison.scoring.composite import CandidateScores, compute_composite
+from pixelpoison.scoring.ensemble_scorer import compute_ensemble_agreement
+from pixelpoison.scoring.quality import check_quality_gate
 
 console = Console()
 
 
 def _get_strategies_for_tier(tier: int) -> list[AttackStrategy]:
     """Return strategies available at the given tier."""
-    strategies: list[AttackStrategy] = [PGDBaseline(), CoTTAStrategy()]
+    strategies: list[AttackStrategy] = [
+        PGDBaseline(),
+        CoTTAStrategy(),
+        SSAStrategy(),       # Tier 1: spectrum simulation for frequency-diverse transferability
+        VMIFGSMStrategy(),   # Tier 1: variance-tuned momentum for stable gradients
+        SoupsStrategy(),     # Tier 1: ensemble of hyperparameter configs
+    ]
 
     if tier >= 2:
         strategies.append(MAttackStrategy())
+        strategies.append(CWAStrategy())  # Tier 2: SAM + CSE for flat loss landscape
 
     if tier >= 3:
         try:

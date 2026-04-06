@@ -26,7 +26,7 @@ class AttackConfig:
 
     def __post_init__(self):
         if self.step_size == 0.0:
-            self.step_size = self.epsilon / max(self.iterations * 0.5, 1.0)
+            self.step_size = max(self.epsilon / max(self.iterations, 10), 1.0 / 255.0)
         if self.quick:
             self.iterations = 100
 
