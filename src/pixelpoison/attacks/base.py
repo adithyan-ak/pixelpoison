@@ -33,7 +33,7 @@ class AttackConfig:
             # the boundary. Remaining iterations refine which pixels are +eps
             # vs -eps — this is where momentum's gradient smoothing matters most.
             # Floor at 1/255 to match the literature; cap at eps/10 for low-iter.
-            self.step_size = max(self.epsilon / max(self.iterations, 10), 1.0 / 255.0)
+            self.step_size = max(2.0 * self.epsilon / max(self.iterations, 10), 2.0 / 255.0)
         if self.quick:
             self.iterations = 100
 

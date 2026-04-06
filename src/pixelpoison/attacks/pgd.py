@@ -114,8 +114,9 @@ class PGDBaseline(AttackStrategy):
         tim_kernel = _get_gaussian_kernel_2d(kernel_size=15, sigma=3.0).to(device)
         tim_padding = 15 // 2
 
-        # --- SIM: number of scale copies ---
-        n_scale_copies = 5
+        # --- SIM: number of scale copies (1x, 1/2x, 1/4x) ---
+        # Kept to 3: beyond 1/4x, images become too small for meaningful CLIP features
+        n_scale_copies = 3
 
         # Initialize perturbation and momentum
         delta = torch.zeros_like(clean_image, requires_grad=True, device=device)
@@ -139,14 +140,25 @@ class PGDBaseline(AttackStrategy):
                 if delta.grad is not None:
                     delta.grad.zero_()
 
-                # --- SIM: accumulate loss across scale copies ---
+                # --- SIM: accumulate loss across spatially-resized copies ---
                 scale_loss = torch.tensor(0.0, device=device)
+                x_adv = (clean_image + delta).clamp(0, 1)
                 for si in range(n_scale_copies):
-                    scale_factor = 1.0 / (2 ** si)
-                    x_adv = (clean_image + delta).clamp(0, 1)
-
                     if si > 0:
-                        x_scaled = x_adv * scale_factor
+                        # SIM: spatially downscale then upscale back.
+                        # Forces perturbation to work at multiple spatial scales.
+                        _, _, h, w = x_adv.shape
+                        scale = 1.0 / (2 ** si)
+                        new_h = max(32, int(h * scale))
+                        new_w = max(32, int(w * scale))
+                        x_down = F.interpolate(
+                            x_adv, size=(new_h, new_w),
+                            mode="bilinear", align_corners=False,
+                        )
+                        x_scaled = F.interpolate(
+                            x_down, size=(h, w),
+                            mode="bilinear", align_corners=False,
+                        )
                     else:
                         x_scaled = x_adv
 
