@@ -129,7 +129,7 @@ class IPGAStrategy(AttackStrategy):
 
         # Initialize perturbation
         delta = torch.zeros_like(clean_image, requires_grad=True, device=device)
-        step_size = config.epsilon / max(config.iterations * 0.5, 1.0)
+        step_size = config.step_size
 
         best_score = -float("inf")
         best_delta = delta.data.clone()

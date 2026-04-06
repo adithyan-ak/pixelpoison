@@ -90,7 +90,7 @@ class VMIFGSMStrategy(AttackStrategy):
         # Hyperparameters
         mu = 1.0          # Momentum decay
         beta = 1.5         # Neighborhood radius multiplier
-        n_samples = 20     # Neighborhood samples for variance estimate
+        n_samples = 5      # Neighborhood samples (reduced for ensemble efficiency)
 
         # Initialize
         delta = torch.zeros_like(clean_image, requires_grad=True, device=device)

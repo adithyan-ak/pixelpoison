@@ -4,15 +4,11 @@ Research basis: Long et al., "Frequency Domain Model Augmentation for
 Adversarial Attack" (ECCV 2022, arXiv:2207.05382).
 
 Key insight: Instead of needing many surrogate models, SSA simulates model
-diversity by randomly perturbing DCT spectrum coefficients before each gradient
-computation. This makes the perturbation transferable across models with
-different frequency sensitivities.
+diversity by randomly perturbing frequency spectrum coefficients before each
+gradient computation. This makes the perturbation transferable across models
+with different frequency sensitivities.
 
-At each iteration:
-1. Sample N spectrum-transformed copies of the current adversarial image
-2. Average gradients across all N copies
-3. Accumulate with MI-FGSM momentum
-4. PGD sign-gradient update
+Uses torch.fft.fft2/ifft2 for correct differentiable spectrum transformation.
 """
 
 from __future__ import annotations
@@ -27,102 +23,40 @@ from pixelpoison.attacks.base import AttackConfig, AttackStrategy, CandidateResu
 from pixelpoison.scoring.quality import compute_psnr, compute_ssim
 
 
-def _dct_2d(x: torch.Tensor) -> torch.Tensor:
-    """Full-image 2D DCT via FFT (differentiable).
-
-    Args:
-        x: (B, C, H, W) tensor.
-
-    Returns:
-        DCT coefficients (B, C, H, W).
-    """
-    # Type-II DCT via real FFT
-    # DCT along height
-    n_h = x.shape[2]
-    v_h = torch.cat([x[:, :, ::2, :], x[:, :, 1::2, :].flip(dims=[2])], dim=2)
-    fft_h = torch.fft.rfft(v_h, dim=2, n=n_h)
-    k_h = torch.arange(n_h, device=x.device, dtype=x.dtype)
-    shift_h = torch.exp(-1j * torch.pi * k_h / (2 * n_h)).unsqueeze(0).unsqueeze(0).unsqueeze(-1)
-    dct_h = (fft_h * shift_h[:, :, : fft_h.shape[2], :]).real
-
-    # DCT along width
-    n_w = x.shape[3]
-    v_w = torch.cat([dct_h[:, :, :, ::2], dct_h[:, :, :, 1::2].flip(dims=[3])], dim=3)
-    fft_w = torch.fft.rfft(v_w, dim=3, n=n_w)
-    k_w = torch.arange(n_w, device=x.device, dtype=x.dtype)
-    shift_w = torch.exp(-1j * torch.pi * k_w / (2 * n_w)).unsqueeze(0).unsqueeze(0).unsqueeze(0)
-    dct_out = (fft_w * shift_w[:, :, :, : fft_w.shape[3]]).real
-
-    return dct_out
-
-
-def _idct_2d(x: torch.Tensor) -> torch.Tensor:
-    """Full-image 2D inverse DCT via FFT (differentiable).
-
-    Args:
-        x: DCT coefficients (B, C, H, W).
-
-    Returns:
-        Spatial domain tensor (B, C, H, W).
-    """
-    # Inverse DCT along width
-    n_w = x.shape[3]
-    k_w = torch.arange(n_w, device=x.device, dtype=x.dtype)
-    shift_w = torch.exp(1j * torch.pi * k_w / (2 * n_w)).unsqueeze(0).unsqueeze(0).unsqueeze(0)
-    # Extend to complex
-    x_complex = x * shift_w[:, :, :, : x.shape[3]]
-    ifft_w = torch.fft.irfft(x_complex, dim=3, n=n_w)
-    # Unshuffle
-    out_w = torch.zeros_like(ifft_w)
-    half_w = (n_w + 1) // 2
-    out_w[:, :, :, ::2] = ifft_w[:, :, :, :half_w]
-    out_w[:, :, :, 1::2] = ifft_w[:, :, :, half_w:].flip(dims=[3])
-
-    # Inverse DCT along height
-    n_h = out_w.shape[2]
-    k_h = torch.arange(n_h, device=x.device, dtype=x.dtype)
-    shift_h = torch.exp(1j * torch.pi * k_h / (2 * n_h)).unsqueeze(0).unsqueeze(0).unsqueeze(-1)
-    w_complex = out_w * shift_h[:, :, : out_w.shape[2], :]
-    ifft_h = torch.fft.irfft(w_complex, dim=2, n=n_h)
-    out_h = torch.zeros_like(ifft_h)
-    half_h = (n_h + 1) // 2
-    out_h[:, :, ::2, :] = ifft_h[:, :, :half_h, :]
-    out_h[:, :, 1::2, :] = ifft_h[:, :, half_h:, :].flip(dims=[2])
-
-    return out_h
-
-
 def _spectrum_transform(
     x: torch.Tensor,
     rho: float = 0.5,
     sigma: float = 16.0 / 255.0,
 ) -> torch.Tensor:
-    """Apply SSA spectrum transformation.
+    """Apply SSA spectrum transformation via FFT (differentiable).
 
-    T(x) = IDCT( DCT(x + xi) * M )
-    where xi ~ N(0, sigma^2) and M ~ U(1-rho, 1+rho).
+    T(x) = IFFT( FFT(x + xi) * M )
+    where xi ~ N(0, sigma^2) and M ~ U(1-rho, 1+rho) applied to magnitude.
 
     Args:
         x: Image tensor (B, C, H, W) in [0, 1].
-        rho: Width of uniform scaling range for DCT coefficients.
+        rho: Width of uniform scaling range for spectrum coefficients.
         sigma: Standard deviation of input noise.
 
     Returns:
         Spectrum-transformed image (B, C, H, W).
     """
-    # Add Gaussian noise
+    # Add Gaussian noise for input diversity
     xi = torch.randn_like(x) * sigma
     x_noisy = x + xi
 
-    # Forward DCT
-    dct_coeffs = _dct_2d(x_noisy)
+    # Forward FFT (full complex, differentiable)
+    freq = torch.fft.fft2(x_noisy)
 
-    # Random multiplicative mask on DCT coefficients
-    m = 1.0 - rho + 2.0 * rho * torch.rand_like(dct_coeffs)
-    dct_masked = dct_coeffs * m
+    # Random multiplicative mask on spectrum magnitude
+    # M ~ U(1-rho, 1+rho) — perturbs each frequency component independently
+    m = 1.0 - rho + 2.0 * rho * torch.rand(
+        freq.shape, device=x.device, dtype=x.dtype
+    )
+    freq_masked = freq * m
 
-    # Inverse DCT
-    x_transformed = _idct_2d(dct_masked)
+    # Inverse FFT back to spatial domain
+    x_transformed = torch.fft.ifft2(freq_masked).real
 
     return x_transformed.clamp(0, 1)
 
@@ -130,13 +64,11 @@ def _spectrum_transform(
 class SSAStrategy(AttackStrategy):
     """SSA: Spectrum Simulation Attack.
 
-    Simulates model diversity via DCT-domain augmentation. At each iteration,
-    N spectrum-transformed copies are generated, gradients are averaged,
-    and accumulated with MI-FGSM momentum for the PGD update.
+    Simulates model diversity via frequency-domain augmentation. At each
+    iteration, N spectrum-transformed copies are generated, gradients are
+    averaged, and accumulated with MI-FGSM momentum for the PGD update.
 
-    This is particularly effective for transferability because different VLMs
-    have different frequency sensitivities, and SSA implicitly optimizes
-    across a distribution of frequency responses.
+    N is kept small (5) to balance diversity vs compute cost with an ensemble.
     """
 
     @property
@@ -166,10 +98,10 @@ class SSAStrategy(AttackStrategy):
             torch.manual_seed(config.seed)
 
         # Hyperparameters
-        rho = 0.5        # DCT coefficient scaling range
-        sigma = config.epsilon  # Input noise std
-        n_samples = 20   # Spectrum transforms per iteration
-        mu = 1.0         # MI-FGSM momentum decay
+        rho = 0.5                # Spectrum coefficient scaling range
+        sigma = config.epsilon   # Input noise std
+        n_samples = 5            # Spectrum transforms per iteration (reduced for ensemble)
+        mu = 1.0                 # MI-FGSM momentum decay
 
         # Initialize perturbation and momentum
         delta = torch.zeros_like(clean_image, requires_grad=True, device=device)
@@ -209,7 +141,9 @@ class SSAStrategy(AttackStrategy):
             avg_grad = avg_grad / n_samples
 
             # MI-FGSM momentum accumulation
-            avg_grad_norm = avg_grad / (avg_grad.abs().mean(dim=[1, 2, 3], keepdim=True) + 1e-12)
+            avg_grad_norm = avg_grad / (
+                avg_grad.abs().mean(dim=[1, 2, 3], keepdim=True) + 1e-12
+            )
             momentum = mu * momentum + avg_grad_norm
 
             # PGD update
