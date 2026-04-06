@@ -287,7 +287,7 @@ class MAttackStrategy(AttackStrategy):
                 if progress_callback:
                     progress_callback(iteration, current_score)
 
-                early_stop_threshold = 0.75 if config.quick else 0.85
+                early_stop_threshold = 0.85 if config.quick else 0.95
                 if current_score > early_stop_threshold:
                     break
                 if no_improve_count >= 10:  # Checked every 25 iters, so 250 stale iters

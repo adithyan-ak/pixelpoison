@@ -151,10 +151,10 @@ class PGDBaseline(AttackStrategy):
                 progress_callback(iteration, current_score)
 
             # Early stopping
-            early_stop_threshold = 0.75 if config.quick else 0.85
+            early_stop_threshold = 0.85 if config.quick else 0.95
             if current_score > early_stop_threshold:
                 break
-            if no_improve_count >= 50:
+            if no_improve_count >= 200:
                 break
             if torch.isnan(delta.data).any() or torch.isinf(delta.data).any():
                 delta.data = best_delta
