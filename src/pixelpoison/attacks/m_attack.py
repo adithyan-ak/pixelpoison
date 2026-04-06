@@ -1,10 +1,15 @@
-"""M-Attack: Random-crop local-to-global feature matching.
+"""M-Attack: Random-crop local-to-global feature matching with MI-FGSM + TIM.
 
-Research basis: M-Attack (NeurIPS 2025) + SGMA semantic guidance + TATM typography augmentation.
+Research basis:
+- M-Attack (NeurIPS 2025): random-crop local-to-global matching
+- SGMA semantic guidance + TATM typography augmentation
+- MI-FGSM momentum: Dong et al. (CVPR 2018)
+- TIM (Translation-Invariant Method): Dong et al. (CVPR 2019)
 
 Key insight: standard PGD produces uniform noise that VLM vision encoders ignore.
 Random cropping forces semantic energy to distribute non-uniformly, concentrating
-in regions that all models attend to.
+in regions that all models attend to. MI-FGSM momentum stabilizes gradient
+direction across random crops for better convergence.
 """
 
 from __future__ import annotations
@@ -15,41 +20,19 @@ import time
 from typing import Callable, Optional
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 
 from pixelpoison.attacks.base import AttackConfig, AttackStrategy, CandidateResult
 from pixelpoison.scoring.quality import compute_psnr, compute_ssim
 
 
-def _compute_affine_from_crop(
-    crop_box: tuple[float, float, float, float],
-    src_h: int,
-    src_w: int,
-) -> torch.Tensor:
-    """Compute a 2x3 affine matrix that maps the crop region to the full output.
-
-    Args:
-        crop_box: (y1, x1, y2, x2) in normalized [0, 1] coords.
-        src_h: Source image height.
-        src_w: Source image width.
-
-    Returns:
-        (1, 2, 3) affine matrix for F.affine_grid.
-    """
-    y1, x1, y2, x2 = crop_box
-
-    # Convert [0, 1] coords to [-1, 1] for grid_sample
-    cx = (x1 + x2) - 1.0  # Center in [-1, 1]
-    cy = (y1 + y2) - 1.0
-    sx = x2 - x1  # Scale
-    sy = y2 - y1
-
-    theta = torch.tensor(
-        [[[sx, 0, cx], [0, sy, cy]]],
-        dtype=torch.float32,
-    )
-    return theta
+def _get_gaussian_kernel_2d(kernel_size: int = 7, sigma: float = 1.5) -> torch.Tensor:
+    """Create a 2D Gaussian kernel for TIM gradient smoothing."""
+    coords = torch.arange(kernel_size, dtype=torch.float32) - kernel_size // 2
+    g = torch.exp(-0.5 * (coords / sigma) ** 2)
+    kernel_1d = g / g.sum()
+    kernel_2d = kernel_1d.outer(kernel_1d)
+    return kernel_2d.unsqueeze(0).unsqueeze(0).expand(3, 1, -1, -1)
 
 
 def _differentiable_crop_resize(
@@ -62,14 +45,6 @@ def _differentiable_crop_resize(
     Uses tensor slicing (gradient flows to cropped pixels) and F.interpolate
     (differentiable on all backends) instead of grid_sample, whose backward
     is not implemented on MPS.
-
-    Args:
-        x: Image tensor (B, C, H, W).
-        crop_box: (y1, x1, y2, x2) in normalized [0, 1] coords.
-        target_size: Output size (square).
-
-    Returns:
-        Cropped and resized tensor (B, C, target_size, target_size).
     """
     _, _, h, w = x.shape
     y1, x1, y2, x2 = crop_box
@@ -80,7 +55,10 @@ def _differentiable_crop_resize(
     px2 = max(px1 + 1, min(int(x2 * w), w))
 
     cropped = x[:, :, py1:py2, px1:px2]
-    return F.interpolate(cropped, size=(target_size, target_size), mode="bilinear", align_corners=False)
+    return F.interpolate(
+        cropped, size=(target_size, target_size),
+        mode="bilinear", align_corners=False,
+    )
 
 
 def _sample_random_crop(
@@ -90,36 +68,20 @@ def _sample_random_crop(
     scale_range: tuple[float, float] = (0.5, 1.0),
     aspect_range: tuple[float, float] = (0.8, 1.2),
 ) -> tuple[float, float, float, float]:
-    """Sample a random crop box, optionally biased by semantic relevance.
-
-    Args:
-        h: Image height.
-        w: Image width.
-        relevance_map: Optional (H, W) tensor with semantic relevance scores.
-            If provided, 70% of crops are biased toward high-relevance regions.
-        scale_range: (min_scale, max_scale) relative to image size.
-        aspect_range: (min_aspect, max_aspect) ratio.
-
-    Returns:
-        (y1, x1, y2, x2) in normalized [0, 1] coords.
-    """
+    """Sample a random crop box, optionally biased by semantic relevance."""
     scale = random.uniform(*scale_range)
     aspect = random.uniform(*aspect_range)
 
     crop_h = min(1.0, scale * math.sqrt(aspect))
     crop_w = min(1.0, scale / math.sqrt(aspect))
 
-    # Determine center
     if relevance_map is not None and random.random() < 0.7:
-        # Bias toward high-relevance region
         flat = relevance_map.flatten()
-        # Weighted sampling
-        probs = F.softmax(flat * 3.0, dim=0)  # Temperature to sharpen
+        probs = F.softmax(flat * 3.0, dim=0)
         idx = torch.multinomial(probs, 1).item()
         cy = (idx // relevance_map.shape[1]) / relevance_map.shape[0]
         cx = (idx % relevance_map.shape[1]) / relevance_map.shape[1]
     else:
-        # Uniform random center
         cy = random.uniform(crop_h / 2, 1.0 - crop_h / 2)
         cx = random.uniform(crop_w / 2, 1.0 - crop_w / 2)
 
@@ -136,18 +98,7 @@ def _compute_semantic_map(
     ensemble,
     target_embeddings: dict[str, torch.Tensor],
 ) -> torch.Tensor:
-    """Compute SGMA semantic relevance map via simplified GradCAM.
-
-    Identifies which image regions all models attend to.
-
-    Args:
-        image: Clean image tensor (1, 3, H, W).
-        ensemble: CLIPEnsemble instance.
-        target_embeddings: Target text embeddings.
-
-    Returns:
-        (H, W) relevance map normalized to [0, 1].
-    """
+    """Compute SGMA semantic relevance map via simplified GradCAM."""
     device = image.device
     _, _, h, w = image.shape
     image_grad = image.clone().requires_grad_(True)
@@ -164,17 +115,14 @@ def _compute_semantic_map(
         sim.backward()
 
         if image_grad.grad is not None:
-            # Gradient magnitude as relevance
-            grad_map = image_grad.grad.abs().mean(dim=(0, 1))  # (H, W)
+            grad_map = image_grad.grad.abs().mean(dim=(0, 1))
             relevance_maps.append(grad_map.detach())
 
     if not relevance_maps:
         return torch.ones(h, w, device=device)
 
-    # Average across models
     avg_map = torch.stack(relevance_maps).mean(dim=0)
 
-    # Normalize to [0, 1]
     min_val = avg_map.min()
     max_val = avg_map.max()
     if max_val - min_val > 1e-8:
@@ -186,14 +134,13 @@ def _compute_semantic_map(
 
 
 class MAttackStrategy(AttackStrategy):
-    """M-Attack: Transferable targeted attack via random cropping.
+    """M-Attack with MI-FGSM momentum + TIM for transferable targeted attacks.
 
     At each iteration, a random crop of the adversarial image is extracted
-    and aligned with the target embedding. The gradient flows through the
-    differentiable crop+resize operation back to the full image pixels.
-
-    Over many iterations with random crops, gradient accumulates non-uniformly,
-    concentrating on semantically important regions.
+    and aligned with the target embedding. MI-FGSM momentum accumulates
+    gradients across different random crops, building a stable estimate of
+    the optimal perturbation direction. TIM smooths gradients to reduce
+    position-dependent overfitting.
     """
 
     @property
@@ -229,9 +176,15 @@ class MAttackStrategy(AttackStrategy):
         if not config.quick:
             relevance_map = _compute_semantic_map(clean_image, ensemble, target_embeddings)
 
-        # Initialize perturbation
+        # Setup TIM (Gaussian kernel for gradient smoothing)
+        tim_kernel = _get_gaussian_kernel_2d(kernel_size=7, sigma=1.5).to(device)
+        tim_padding = 7 // 2
+
+        # Initialize perturbation and MI-FGSM momentum
         delta = torch.zeros_like(clean_image, requires_grad=True, device=device)
-        step_size = config.epsilon / max(config.iterations * 0.5, 1.0)
+        momentum = torch.zeros_like(clean_image, device=device)
+        mu = 1.0  # MI-FGSM momentum decay
+        alpha = config.step_size
 
         best_score = -float("inf")
         best_delta = delta.data.clone()
@@ -243,30 +196,45 @@ class MAttackStrategy(AttackStrategy):
 
             x_adv = (clean_image + delta).clamp(0, 1)
 
-            # Sample random crop
-            crop_box = _sample_random_crop(h, w, relevance_map)
-
-            # Differentiable crop + resize to 224x224
-            x_crop = _differentiable_crop_resize(x_adv, crop_box, target_size=224)
-
-            # Compute loss across ensemble
+            # Sample multiple random crops per iteration for gradient averaging
+            n_crops = 3
             total_loss = torch.tensor(0.0, device=device)
-            for model_id in ensemble.loaded_models:
-                emb = ensemble.encode_image_single(x_crop, model_id)
-                target_emb = target_embeddings[model_id]
-                loss = -F.cosine_similarity(emb, target_emb, dim=-1).mean()
-                total_loss = total_loss + loss
 
-            total_loss = total_loss / ensemble.model_count
+            for _ in range(n_crops):
+                crop_box = _sample_random_crop(h, w, relevance_map)
+                x_crop = _differentiable_crop_resize(x_adv, crop_box, target_size=224)
+
+                for model_id in ensemble.loaded_models:
+                    emb = ensemble.encode_image_single(x_crop, model_id)
+                    target_emb = target_embeddings[model_id]
+                    loss = -F.cosine_similarity(emb, target_emb, dim=-1).mean()
+                    total_loss = total_loss + loss
+
+            total_loss = total_loss / (n_crops * ensemble.model_count)
+
+            # Also add full-image loss to maintain global coherence
+            for model_id in ensemble.loaded_models:
+                emb_full = ensemble.encode_image_single(x_adv, model_id)
+                target_emb = target_embeddings[model_id]
+                full_loss = -F.cosine_similarity(emb_full, target_emb, dim=-1).mean()
+                total_loss = total_loss + 0.5 * full_loss
+
             total_loss.backward()
 
-            # PGD update — gradient flows through grid_sample back to full delta
+            # --- TIM: smooth gradient ---
+            grad = delta.grad.data
+            grad = F.conv2d(grad, tim_kernel, padding=tim_padding, groups=3)
+
+            # --- MI-FGSM: momentum update ---
+            grad_norm = grad / (torch.mean(torch.abs(grad)) + 1e-12)
+            momentum = mu * momentum + grad_norm
+
             with torch.no_grad():
-                delta.data = delta.data - step_size * delta.grad.sign()
+                delta.data = delta.data - alpha * momentum.sign()
                 delta.data = delta.data.clamp(-config.epsilon, config.epsilon)
                 delta.data = (clean_image + delta.data).clamp(0, 1) - clean_image
 
-            # Periodically check full-image score (not just crop score)
+            # Check full-image score periodically
             if (iteration + 1) % 25 == 0 or iteration == config.iterations - 1:
                 with torch.no_grad():
                     full_adv = (clean_image + delta.data).clamp(0, 1)
@@ -287,10 +255,10 @@ class MAttackStrategy(AttackStrategy):
                 if progress_callback:
                     progress_callback(iteration, current_score)
 
-                early_stop_threshold = 0.75 if config.quick else 0.85
-                if current_score > early_stop_threshold:
+                # Early stopping (relaxed)
+                if current_score > 0.95:
                     break
-                if no_improve_count >= 10:  # Checked every 25 iters, so 250 stale iters
+                if no_improve_count >= 20:  # Checked every 25 iters = 500 stale iters
                     break
 
         # Final result
@@ -315,5 +283,9 @@ class MAttackStrategy(AttackStrategy):
             ssim=compute_ssim(clean_image, adversarial.detach()),
             iterations_used=iteration + 1,
             time_seconds=time.time() - start_time,
-            metadata={"used_semantic_guidance": relevance_map is not None},
+            metadata={
+                "used_semantic_guidance": relevance_map is not None,
+                "momentum_decay": mu,
+                "crops_per_iteration": n_crops,
+            },
         )

@@ -26,7 +26,10 @@ class AttackConfig:
 
     def __post_init__(self):
         if self.step_size == 0.0:
-            self.step_size = self.epsilon / max(self.iterations * 0.5, 1.0)
+            # MI-FGSM standard: alpha = epsilon / T
+            # With momentum (mu=1.0), sign(accumulated_grad) stabilizes over
+            # iterations, so alpha=eps/T uses the full perturbation budget evenly.
+            self.step_size = self.epsilon / max(self.iterations, 10)
         if self.quick:
             self.iterations = 100
 

@@ -1,10 +1,13 @@
 """CoTTA: Covert Triggered dual-Target Attack.
 
-Research basis: arXiv:2603.29418 (March 2026)
+Research basis:
+- CoTTA dual-target: arXiv:2603.29418 (March 2026)
+- MI-FGSM momentum: Dong et al. (CVPR 2018)
+- DIM (Diverse Input Method): Xie et al. (CVPR 2019)
 
 Two-phase optimization:
 - Phase 1 (10%): Optimize covert text trigger placement
-- Phase 2 (90%): Dual-target perturbation with dynamic target refinement
+- Phase 2 (90%): Dual-target perturbation with momentum + DIM
 """
 
 from __future__ import annotations
@@ -16,8 +19,8 @@ import torch
 import torch.nn.functional as F
 
 from pixelpoison.attacks.base import AttackConfig, AttackStrategy, CandidateResult
+from pixelpoison.augmentation.transforms import AugmentationPipeline
 from pixelpoison.rendering.text_overlay import (
-    TextTriggerParams,
     optimize_text_trigger,
     render_text_trigger,
 )
@@ -25,18 +28,18 @@ from pixelpoison.scoring.quality import compute_psnr, compute_ssim
 
 
 class CoTTAStrategy(AttackStrategy):
-    """CoTTA: Covert Triggered dual-Target Attack.
+    """CoTTA: Covert Triggered dual-Target Attack with MI-FGSM + DIM.
 
     Phase 1 — Text Trigger Optimization:
         Find optimal text overlay parameters that maximize CLIP alignment
-        while minimizing visual impact. The text acts as a semantic anchor.
+        while minimizing visual impact.
 
-    Phase 2 — Dual-Target Perturbation:
+    Phase 2 — Dual-Target Perturbation with MI-FGSM momentum + DIM:
         Optimize perturbation against two targets simultaneously:
         1. Target text embedding (the payload)
         2. A dynamic target image that evolves toward the payload
-        This prevents convergence to local minima that satisfy CLIP loss
-        but don't cause the LLM decoder to follow the instruction.
+        MI-FGSM momentum stabilizes gradient direction for better transfer.
+        DIM (input diversity) prevents overfitting to surrogate spatial features.
     """
 
     @property
@@ -49,7 +52,7 @@ class CoTTAStrategy(AttackStrategy):
 
     @property
     def required_models(self) -> list[str]:
-        return []  # Uses whatever models are in the ensemble
+        return []
 
     def _init_dynamic_target(
         self,
@@ -59,11 +62,7 @@ class CoTTAStrategy(AttackStrategy):
         device: torch.device,
         warmup_steps: int = 50,
     ) -> torch.Tensor:
-        """Initialize the dynamic target image with warmup toward text embedding.
-
-        Starts from Gaussian noise matching the image statistics, then takes
-        gradient steps toward the text embedding for a warm start.
-        """
+        """Initialize the dynamic target image with warmup toward text embedding."""
         x_dyn = torch.randn(image_shape, device=device) * 0.1 + 0.5
         x_dyn = x_dyn.clamp(0, 1).requires_grad_(True)
 
@@ -110,21 +109,28 @@ class CoTTAStrategy(AttackStrategy):
             n_positions=n_pos, n_samples_per_position=n_samples,
         )
 
-        # Apply text trigger to create the base image
-        # We need the payload text — store it in metadata
         payload_text = getattr(config, '_payload', 'test')
         x_triggered = render_text_trigger(clean_image, payload_text, best_trigger)
         x_triggered = x_triggered.to(device)
 
-        # ---- Phase 2: Dual-Target Perturbation ----
+        # ---- Phase 2: Dual-Target Perturbation with MI-FGSM + DIM ----
+
+        # Setup DIM (input diversity)
+        augmenter = AugmentationPipeline(
+            enable_resize=True, enable_blur=True, enable_jitter=True,
+        ).to(device)
+
         # Initialize dynamic target
         x_dyn = self._init_dynamic_target(
             clean_image.shape, target_embeddings, ensemble, device,
             warmup_steps=10 if config.quick else 50,
         )
 
+        # Initialize perturbation and MI-FGSM momentum
         delta = torch.zeros_like(clean_image, requires_grad=True, device=device)
-        step_size = config.epsilon / max(phase2_iters * 0.5, 1.0)
+        momentum = torch.zeros_like(clean_image, device=device)
+        mu = 1.0  # MI-FGSM momentum decay
+        alpha = config.step_size
 
         best_score = -float("inf")
         best_delta = delta.data.clone()
@@ -137,10 +143,13 @@ class CoTTAStrategy(AttackStrategy):
 
             x_adv = (x_triggered + delta).clamp(0, 1)
 
+            # --- DIM: apply input diversity ---
+            x_adv_div = augmenter(x_adv)
+
             total_loss = torch.tensor(0.0, device=device)
 
             for model_id in ensemble.loaded_models:
-                emb_adv = ensemble.encode_image_single(x_adv, model_id)
+                emb_adv = ensemble.encode_image_single(x_adv_div, model_id)
                 emb_dyn = ensemble.encode_image_single(x_dyn.detach(), model_id)
                 target_emb = target_embeddings[model_id]
 
@@ -155,9 +164,13 @@ class CoTTAStrategy(AttackStrategy):
             total_loss = total_loss / ensemble.model_count
             total_loss.backward()
 
-            # PGD update
+            # --- MI-FGSM: momentum update ---
+            grad = delta.grad.data
+            grad_norm = grad / (torch.mean(torch.abs(grad)) + 1e-12)
+            momentum = mu * momentum + grad_norm
+
             with torch.no_grad():
-                delta.data = delta.data - step_size * delta.grad.sign()
+                delta.data = delta.data - alpha * momentum.sign()
                 delta.data = delta.data.clamp(-config.epsilon, config.epsilon)
                 delta.data = (x_triggered + delta.data).clamp(0, 1) - x_triggered
 
@@ -190,7 +203,6 @@ class CoTTAStrategy(AttackStrategy):
                     adv_embs = ensemble.encode_image((x_triggered + best_delta).clamp(0, 1))
                     dyn_loss = torch.tensor(0.0, device=device)
                     for mid in dyn_embs:
-                        # Move toward text, away from current adversarial
                         dyn_loss -= F.cosine_similarity(
                             dyn_embs[mid], target_embeddings[mid], dim=-1
                         ).mean()
@@ -203,11 +215,10 @@ class CoTTAStrategy(AttackStrategy):
                     x_dyn.data.clamp_(0, 1)
                 x_dyn = x_dyn.detach()
 
-            # Early stopping
-            early_stop_threshold = 0.75 if config.quick else 0.85
-            if current_score > early_stop_threshold:
+            # Early stopping (relaxed)
+            if current_score > 0.95:
                 break
-            if no_improve_count >= 50:
+            if no_improve_count >= 200:
                 break
 
         # Final result
@@ -239,5 +250,6 @@ class CoTTAStrategy(AttackStrategy):
                     "opacity": best_trigger.opacity,
                     "rotation": best_trigger.rotation,
                 },
+                "momentum_decay": mu,
             },
         )

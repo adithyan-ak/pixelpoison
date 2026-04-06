@@ -3,16 +3,15 @@
 from __future__ import annotations
 
 import io
-import time
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from PIL import Image
-import numpy as np
 
 from pixelpoison.attacks.base import AttackConfig, CandidateResult
-from pixelpoison.robustness.diff_jpeg import DiffJPEG
 from pixelpoison.robustness.dct import DCTMidFrequencyMask
+from pixelpoison.robustness.diff_jpeg import DiffJPEG
 from pixelpoison.scoring.quality import compute_psnr, compute_ssim
 
 
@@ -110,7 +109,11 @@ def jpeg_harden(
 
     # Start from the candidate's perturbation
     delta = candidate.perturbation.clone().detach().requires_grad_(True)
-    step_size = config.epsilon / max(refinement_iterations * 0.5, 1.0)
+    alpha = config.epsilon / max(refinement_iterations, 10)
+
+    # MI-FGSM momentum for JPEG refinement
+    momentum = torch.zeros_like(delta.data, device=device)
+    mu = 1.0
 
     for _ in range(refinement_iterations):
         if delta.grad is not None:
@@ -132,8 +135,13 @@ def jpeg_harden(
         total_loss = total_loss / ensemble.model_count
         total_loss.backward()
 
+        # MI-FGSM momentum update
+        grad = delta.grad.data
+        grad_norm = grad / (torch.mean(torch.abs(grad)) + 1e-12)
+        momentum = mu * momentum + grad_norm
+
         with torch.no_grad():
-            delta.data = delta.data - step_size * delta.grad.sign()
+            delta.data = delta.data - alpha * momentum.sign()
             delta.data = delta.data.clamp(-config.epsilon, config.epsilon)
             delta.data = (clean_image + delta.data).clamp(0, 1) - clean_image
 
