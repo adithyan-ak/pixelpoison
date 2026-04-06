@@ -26,10 +26,14 @@ class AttackConfig:
 
     def __post_init__(self):
         if self.step_size == 0.0:
-            # MI-FGSM standard: alpha = epsilon / T
-            # With momentum (mu=1.0), sign(accumulated_grad) stabilizes over
-            # iterations, so alpha=eps/T uses the full perturbation budget evenly.
-            self.step_size = self.epsilon / max(self.iterations, 10)
+            # Published MI-FGSM attacks (CoTTA, Qi et al. AAAI'24, InstructTA,
+            # Chain of Attack CVPR'25) all use alpha=1/255 in [0,1] space.
+            # With momentum, sign(accumulated_grad) moves exactly alpha per step.
+            # After eps/alpha steps (~24 for eps=24/255), the perturbation hits
+            # the boundary. Remaining iterations refine which pixels are +eps
+            # vs -eps — this is where momentum's gradient smoothing matters most.
+            # Floor at 1/255 to match the literature; cap at eps/10 for low-iter.
+            self.step_size = max(self.epsilon / max(self.iterations, 10), 1.0 / 255.0)
         if self.quick:
             self.iterations = 100
 
