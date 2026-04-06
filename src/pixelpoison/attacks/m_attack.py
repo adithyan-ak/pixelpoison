@@ -180,10 +180,13 @@ class MAttackStrategy(AttackStrategy):
         tim_kernel = _get_gaussian_kernel_2d(kernel_size=7, sigma=1.5).to(device)
         tim_padding = 7 // 2
 
-        # Initialize perturbation and MI-FGSM momentum
+        # Initialize perturbation and Adam-style momentum (M-Attack V2 paper)
+        # M-Attack V2 (arXiv:2602.17645) uses Adam momentum (beta1=0.9, beta2=0.99)
+        # instead of standard MI-FGSM, providing better convergence.
         delta = torch.zeros_like(clean_image, requires_grad=True, device=device)
-        momentum = torch.zeros_like(clean_image, device=device)
-        mu = 1.0  # MI-FGSM momentum decay
+        m1 = torch.zeros_like(clean_image, device=device)  # First moment
+        m2 = torch.zeros_like(clean_image, device=device)  # Second moment
+        beta1, beta2 = 0.9, 0.99
         alpha = config.step_size
 
         best_score = -float("inf")
@@ -196,8 +199,8 @@ class MAttackStrategy(AttackStrategy):
 
             x_adv = (clean_image + delta).clamp(0, 1)
 
-            # Sample multiple random crops per iteration for gradient averaging
-            n_crops = 3
+            # M-Attack V2 uses K=10 crops per iteration for Multi-Crop Alignment
+            n_crops = 10
             total_loss = torch.tensor(0.0, device=device)
 
             for _ in range(n_crops):
@@ -225,12 +228,17 @@ class MAttackStrategy(AttackStrategy):
             grad = delta.grad.data
             grad = F.conv2d(grad, tim_kernel, padding=tim_padding, groups=3)
 
-            # --- MI-FGSM: momentum update ---
-            grad_norm = grad / (torch.mean(torch.abs(grad)) + 1e-12)
-            momentum = mu * momentum + grad_norm
+            # --- Adam-style momentum update (M-Attack V2) ---
+            m1 = beta1 * m1 + (1 - beta1) * grad
+            m2 = beta2 * m2 + (1 - beta2) * grad * grad
+            # Bias correction
+            m1_hat = m1 / (1 - beta1 ** (iteration + 1))
+            m2_hat = m2 / (1 - beta2 ** (iteration + 1))
+            # Adam update direction (sign for L-inf PGD)
+            adam_grad = m1_hat / (m2_hat.sqrt() + 1e-8)
 
             with torch.no_grad():
-                delta.data = delta.data - alpha * momentum.sign()
+                delta.data = delta.data - alpha * adam_grad.sign()
                 delta.data = delta.data.clamp(-config.epsilon, config.epsilon)
                 delta.data = (clean_image + delta.data).clamp(0, 1) - clean_image
 
@@ -285,7 +293,7 @@ class MAttackStrategy(AttackStrategy):
             time_seconds=time.time() - start_time,
             metadata={
                 "used_semantic_guidance": relevance_map is not None,
-                "momentum_decay": mu,
+                "adam_betas": (beta1, beta2),
                 "crops_per_iteration": n_crops,
             },
         )
