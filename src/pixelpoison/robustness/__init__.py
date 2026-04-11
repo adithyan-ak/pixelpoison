@@ -3,16 +3,14 @@
 from __future__ import annotations
 
 import io
-import time
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from PIL import Image
-import numpy as np
 
 from pixelpoison.attacks.base import AttackConfig, CandidateResult
 from pixelpoison.robustness.diff_jpeg import DiffJPEG
-from pixelpoison.robustness.dct import DCTMidFrequencyMask
 from pixelpoison.scoring.quality import compute_psnr, compute_ssim
 
 
@@ -106,11 +104,10 @@ def jpeg_harden(
     """
     device = clean_image.device
     diff_jpeg = DiffJPEG(quality=config.jpeg_quality).to(device)
-    dct_mask = DCTMidFrequencyMask().to(device)
 
     # Start from the candidate's perturbation
     delta = candidate.perturbation.clone().detach().requires_grad_(True)
-    step_size = config.epsilon / max(refinement_iterations * 0.5, 1.0)
+    step_size = max(2.0 * config.epsilon / max(refinement_iterations, 10), 2.0 / 255.0)
 
     for _ in range(refinement_iterations):
         if delta.grad is not None:
@@ -137,9 +134,8 @@ def jpeg_harden(
             delta.data = delta.data.clamp(-config.epsilon, config.epsilon)
             delta.data = (clean_image + delta.data).clamp(0, 1) - clean_image
 
-    # Apply DCT mid-frequency mask to final perturbation
+    # Project final perturbation to epsilon-ball
     with torch.no_grad():
-        delta.data = dct_mask(delta.data)
         delta.data = delta.data.clamp(-config.epsilon, config.epsilon)
 
     # Final adversarial image

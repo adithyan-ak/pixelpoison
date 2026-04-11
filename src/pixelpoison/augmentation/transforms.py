@@ -83,7 +83,7 @@ class AugmentationPipeline(nn.Module):
         Returns:
             Augmented image tensor (B, 3, H, W) in [0, 1].
         """
-        if self.enable_resize and random.random() < 0.5:
+        if self.enable_resize and random.random() < 0.7:
             x = self._random_resize(x)
 
         if self.enable_blur and random.random() < 0.3:

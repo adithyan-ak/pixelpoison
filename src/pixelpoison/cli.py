@@ -177,7 +177,9 @@ def encode(
     target_embeddings = ensemble.encode_text(payload)
 
     # 5. Configure attack
-    effective_iterations = iterations if iterations is not None else (100 if quick else {1: 300, 2: 500, 3: 500}[effective_tier])
+    # At 336px optimization resolution, each iteration is ~9x faster than 1024px.
+    # Use higher iteration counts for better convergence at negligible time cost.
+    effective_iterations = iterations if iterations is not None else (100 if quick else {1: 500, 2: 1000, 3: 1000}[effective_tier])
 
     attack_config = AttackConfig(
         epsilon=epsilon,
@@ -369,7 +371,7 @@ def score(
     hw = detect_hardware()
     if hw.tier < 3:
         console.print("[yellow]VLM proxy scoring requires Tier 3 hardware (20GB+ VRAM or 32GB+ MPS).[/yellow]")
-        console.print("Your hardware was detected as Tier {hw.tier}.")
+        console.print(f"Your hardware was detected as Tier {hw.tier}.")
         raise typer.Exit(1)
 
     device = torch.device(hw.device)

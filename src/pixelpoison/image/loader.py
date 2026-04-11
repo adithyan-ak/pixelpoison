@@ -6,14 +6,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-import torch
 import numpy as np
-from PIL import Image, ExifTags
+import torch
+from PIL import ExifTags, Image
 
 SUPPORTED_FORMATS = {"JPEG", "PNG", "WEBP", "BMP"}
 MIN_SIZE = 224
 MAX_SIZE = 4096
-INTERNAL_MAX_SIZE = 1024  # Resize to this for optimization; map perturbation back later
+INTERNAL_MAX_SIZE = 336  # Optimize at CLIP's native resolution; perturbation upscaled on save
 
 
 @dataclass
